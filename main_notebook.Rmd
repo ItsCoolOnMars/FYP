@@ -1,0 +1,57 @@
+---
+title: "main_notebook"
+author: "Maxim Musikhin"
+date: "30 November 2020"
+output: html_document
+---
+
+# Load data
+
+```{r}
+
+```
+
+# Wrangling
+
+```{r}
+
+```
+
+
+# Making the distance score
+
+```{r}
+
+```
+
+# Plots
+
+```{r}
+
+```
+
+# Clustering
+
+```{r}
+
+```
+
+# Building a model
+
+```{r}
+
+```
+
+# Applying ACO
+
+```{r}
+
+```
+
+# Evaluation
+
+```{r}
+
+```
+
+
