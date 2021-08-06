@@ -5,130 +5,430 @@ date: "30 November 2020"
 output: html_document
 ---
 
-# Load data
+# Import Packages
 
-```{r}
-library(dplyr)
-library(caret)
+```{r Packages Used, include=FALSE}
 library(tidyverse)
+library(rhdf5)
+library(reshape2)
 ```
 
-From what time I should count the distances
-
+# From HDF5 to CSV
+The original raw data I had was stored in HDF5 format.
 
 ```{r}
-main_df <- data.frame(c(1:366))
-#Can be done nicer
-main_df <- subset(main_df, select = -c.1.366.)
-ranges <- c(0.6,0.8,1.0,1.2,1.4,1.6,1.8,2.0)
-range_names <- c("very_closed","pretty_closed","closed","neutral","open","pretty_open","very_open")
+# The HDF5 files are named like this D1-PRO-R1001-CG-2lcb-110_129-AA.h5 The difference is only the 2 letters that identify the amino acids mutated.
 
-files <- list.files("data/dataframes/")
+#Assign the input and output directories
+#input_directory <- "data//raw_data/"
+#output_directory <- "data//extracted_data/"
 
-for (i in seq_along(files)) {
+
+convert_and_save_hdf5_as_csv <-
+  function(input_directory, output_directory) {
+    fileNames <- list.files(input_directory)
+    
+    for (fileName in fileNames) {
+      aminoAcid <- substr(fileName, 30, 31)
+      testHDF5 <-
+        H5Fopen(paste(input_directory, fileName, sep = ""))
+      df <- data.frame(t(testHDF5$d1))
+      names(df) <- c("time", "distance")
+      
+      df$simulation <- case_when(df$time <= (100000 * 5) ~ 1,
+                                 df$time <= (200000 * 5) ~ 2,
+                                 df$time <= (299998 * 5) ~ 3)
+      write.csv(
+        x = df,
+        file = paste(output_directory, paste(aminoAcid, ".csv", sep = ""), sep = ""),
+        row.names = FALSE
+      )
+    }
+  }
+
+
+
+#convert_and_save_hdf5_as_csv(input_directory, output_directory)
+```
+
+# Setting up for work
+
+## Initialising constants
+
+```{r}
+# Identify the path to the directory that contains the extracted data
+data_directory <- "data//extracted_data/"
+```
+
+## Sort out the corrupted files
+
+All the corrupted files should be filtered out.
+
+This include files that:
+
+- have more than 299,998 rows
+- contain distance values that are out of allowed range (0.6-2.0) 
+
+```{r}
+identify_valid_files <- function(path_to_files) {
+  # State criteria that will be used to select valid records
+  allowed_records_number <- 299998
+  allowed_distance_lower_limit <- 0.6
+  allowed_distance_upper_limit <- 2.0
   
-  main_df$name[i] <- substr(files[i], 1, 2)
-  df <- read.csv(paste("data/dataframes/", files[i], sep=""))
-  main_df$num_of_records[i] <- nrow(df)
+  # List the csv file names
+  files <- list.files(path_to_files)
   
-  for (j in seq_along(range_names)) {
-    main_df[i,range_names[j]] <-   sum(df$distance>=ranges[j]&df$distance<ranges[j+1])
+  # Initialise an array for correct files
+  valid_files <- c()
+  
+  
+  # Iterate over each file and check if they satisfy the condition
+  for (i in seq_along(files)) {
+    df <- read.csv(paste(path_to_files, files[i], sep = ""))
+    
+    df_cropped <- subset(
+      df,
+      df$distance > allowed_distance_lower_limit &
+        df$distance < allowed_distance_upper_limit
+    )
+    
+    number_of_valid_records <- nrow(df_cropped)
+    
+    if (number_of_valid_records == allowed_records_number) {
+      valid_files <- append(valid_files, files[i])
+    }
+  }
+  return(valid_files)
+}
+```
+
+## Creating the main dataframe
+
+Create data frame that will include the metadata for all of mutants.
+```{r}
+fill_the_main_df <- function() {
+  # Get file names
+  files <- identify_valid_files(data_directory)
+  
+  # Remove ".csv" ending to get only amino acid names
+  aa_names <- substr(files, 1, 2) 
+  
+  # vectorise by letters
+  fl <- substr(aa_names, 1, 1)
+  sl <- substr(aa_names, 2, 2)
+  
+  # Create a data frame that will be filled later
+  main_df <-
+    data.frame(name = aa_names,
+               first_letter = fl,
+               second_letter = sl)
+  
+  # Fill it with amino acid property details
+  # Hydrophobicity scale data (http://assets.geneious.com/manual/8.0/GeneiousManualsu41.html)
+  hydrophobicity_df <- read.csv("data//hydrophobicity.csv")
+  names(hydrophobicity_df) <- c("amino_acid", "hydrophobicity")
+  # Other properties of amino acids (https://en.wikipedia.org/wiki/Proteinogenic_amino_acid)
+  properties_df <- read.csv("data//chemical_props.csv")
+  
+  #to get the total "score" of a property I decided to add the values of two individual amino acid for each mutant
+  for (i in 1:nrow(main_df)) {
+    # Hydrophobicity score is a value that defines the relative hydrophobicity or hydrophilicity of amino acid residue
+    main_df$hydrophobicity[i] <-
+      hydrophobicity_df[hydrophobicity_df$amino_acid == main_df$first_letter[i], 2] +
+      hydrophobicity_df[hydrophobicity_df$amino_acid == main_df$second_letter[i], 2]
+    # The isoelectronic point or isoionic point is the pH at which the amino acid does not migrate in an electric field (it is the pH at which the amino acid is neutral)
+    main_df$pi[i] <-
+      as.numeric(as.character(properties_df[properties_df$Short == main_df$first_letter[i], 5])) +
+      as.numeric(as.character(properties_df[properties_df$Short == main_df$second_letter[i], 5]))
+    # Masses of amino acids
+    main_df$mass[i] <-
+      as.numeric(as.character(properties_df[properties_df$Short == main_df$first_letter[i], 4])) +
+      as.numeric(as.character(properties_df[properties_df$Short == main_df$second_letter[i], 4]))
+    #Van der Waals volume 
+    main_df$vdw_volume[i] <-
+      as.numeric(as.character(properties_df[properties_df$Short == main_df$first_letter[i], 8])) +
+      as.numeric(as.character(properties_df[properties_df$Short == main_df$second_letter[i], 8]))
   }
   
-  if (nrow(df) == 299998) {
+  return(main_df)
+}
+```
+
+```{r}
+# Apply the function
+main_df <- fill_the_main_df()
+```
+
+## Helper functions to easily get the data given the amino acids and simulation number
+
+```{r}
+# The function that reads an individual simulation of a given mutant
+get_sim <- function(AAname, simNum, data_directory = "data//extracted_data/") {
+  if (AAname %in% main_df$name) {
+    fileName <- paste(AAname, ".csv", sep = "")
+    path <- paste(data_directory, fileName, sep = "")
     
-    df_mod <- df[-c(c(1:10000),c(100001:110001),c(200000:210000)),]
-    for (j in seq_along(range_names)) {
-    main_df[i,paste(range_names[j],"mod",sep = "_")] <- sum(df_mod$distance>=ranges[j]&df_mod$distance<ranges[j+1])
+    df <- read.csv(path)
+    
+    if (simNum == 1) {
+      return(df[c(10001:100000), ])
+    } else if (simNum == 2) {
+      return(df[c(110001:200000), ])
+    } else if (simNum == 3) {
+      return(df[c(209999:299998), ])
     }
-  } 
+  }
+  else {
+    return(0)
+  }
 }
 
-main_df$is_size_correct <- main_df$num_of_records==299998
-
-# Calculate scores 
-for (i in 1:366) {
-  main_df$score[i] <- sum(
-    main_df$very_closed[i]*-3,
-    main_df$pretty_closed[i]*-2,
-    main_df$closed[i]*-1,
-    main_df$neutral[i]*0,
-    main_df$open[i]*1,
-    main_df$pretty_open[i]*2,
-    main_df$very_open[i]*3
-  )
+# Function that gives all simulations concatenated
+get_all_sim <- function(AAname, data_directory = "data//extracted_data/") {
+  if (AAname %in% main_df$name) {
+    fileName <- paste(AAname, ".csv", sep = "")
+    path <- paste(data_directory, fileName, sep = "")
+    df <- read.csv(path)
+    
+    
+    return(rbind(df[c(c(10001:100000), c(110001:200000), c(209999:299998)), ]))
+  }
+  else {
+    return(0)
+  }
 }
-for (i in 1:366) {
-  main_df$score_mod[i] <- sum(
-    main_df$very_closed_mod[i]*-3,
-    main_df$pretty_closed_mod[i]*-2,
-    main_df$closed_mod[i]*-1,
-    main_df$neutral_mod[i]*0,
-    main_df$open_mod[i]*1,
-    main_df$pretty_open_mod[i]*2,
-    main_df$very_open_mod[i]*3
-  )
+```
+
+# Generic Plotting functions 
+
+```{r}
+# the function that gives a distance density plot of a sim
+  distance_density_plot <- function(df, aminoAcids) {
+  
+  df$simulation <- as.factor(df$simulation)
+  p <- ggplot(data = df, aes(x = distance, color = simulation)) +
+    ggtitle(aminoAcids) +
+    geom_density() + 
+    scale_x_continuous(name="Distance", limits=c(0.6, 2.0), breaks=seq(0.6,2.0,0.2)) + 
+    theme_minimal()
+  return(p)
+}
+```
+
+```{r}
+# An example of use
+distance_density_plot(get_all_sim("DC"), "DC") 
+```
+# Prediction Linear regression model
+
+```{r}
+#Separate each simulation of each mutant for easier analysis
+sims_df <- rbind(data.frame(name = main_df$name, simulation = rep(1, length(main_df$name))),data.frame(name = main_df$name, simulation = rep(2, length(main_df$name))),data.frame(name = main_df$name, simulation = rep(3, length(main_df$name))))
+sims_df <- sims_df[order(sims_df$name, sims_df$simulation),]
+```
+
+```{r}
+#calculate the variance for each simulation
+
+for (i in seq_along(sims_df$name)) {
+  sim_data <- get_sim(sims_df$name[i],sims_df$simulation[i])
+  sims_df$variance[i] <- var(sim_data$distance)
+}
+
+
+```
+
+```{r}
+for (i in seq_along(main_df$name)) {
+  current_name <- main_df$name[i]
+  main_df$total_var[i] <- var(get_all_sim(current_name)$distance)
+}
+```
+
+
+```{r}
+#mean variation and not the variation of whole mutant because due to unknown reasons (MD simulation related) they can start and get stuck at different distances, therefore it will not be representative
+for (i in seq_along(main_df$name)) {
+  current_name <- main_df$name[i]
+  main_df$mean_var[i] <- mean(sims_df[sims_df$name == current_name,]$variance)
+  main_df$var_of_var[i] <- var(sims_df[sims_df$name == current_name,]$variance)
+  
+}
+```
+
+```{r}
+#generalisation for each amino acid mutation and its position
+aa_df <- data.frame(amino_acid = unique(main_df$first_letter))
+
+for (i in seq_along(aa_df$amino_acid)) {
+  aa_df$as_first_var[i] <- mean(main_df[main_df$first_letter == aa_df$amino_acid[i],]$mean_var)
+  aa_df$as_second_var[i] <- mean(main_df[main_df$second_letter == aa_df$amino_acid[i],]$mean_var)
+  
+  #aa_df$as_first_var[i] <- mean(main_df[main_df$first_letter == aa_df$amino_acid[i],]$var_of_var)
+  #aa_df$as_second_var[i] <- mean(main_df[main_df$second_letter == aa_df$amino_acid[i],]$var_of_var)
+  #
+  #aa_df$as_first_var[i] <- mean(main_df[main_df$first_letter == aa_df$amino_acid[i],]$total_var)
+  #aa_df$as_second_var[i] <- mean(main_df[main_df$second_letter == aa_df$amino_acid[i],]$total_var)
+}
+
+for (i in seq_along(main_df$name)) {
+main_df$var_score[i] <-
+      (aa_df[aa_df$amino_acid == main_df$first_letter[i],]$as_first_var +
+      aa_df[aa_df$amino_acid == main_df$second_letter[i],]$as_second_var)
 }
 
 ```
 
-# Wrangling
-
-
-very_closed
-pretty_closed
-closed
-neutral
-open
-pretty_open
-very_open
-
-1-100000
-100001- 199999
-200000 - 299998
-
-dont count first 10000 from each simulation
+#Fluctuation analysis
 
 ```{r}
-plot(x=df[,1],y=df[,2])
-plot(x=df_mod[,1],y=df_mod[,2])
+fp <- "data//bnz_distance/"  # specify file path
+fl <- list.files( path = fp, pattern = "*.out", full.names = TRUE ) # get .out files
+for (file in fl ){  # loop through files, read it and write it as .csv files. Then delete .out files
+flag <- tryCatch( {
+    write.table( x = read.table(file = file, header = FALSE ), 
+                 file = file.path( fp, gsub( "out$", "csv", basename( file ) ) ), 
+                 sep = ",", 
+                 row.names = FALSE )
+    TRUE
+    },
+    error = function( x ) { 
+      print( paste0( "Problem reading and writing file : ", file ) )
+      return(FALSE) } )
+
+#if( flag ) unlink( file )  # deletes .out files
+}
+```
+
+```{r}
+# finds a percentage of benzene being inside the protein for each mutant
+for (i in seq_along(main_df$name)) {
+  directory <- paste(paste("data//bnz_distance/BNZ-COM-BNZ-AM-1-W15-110_129-", main_df$name[i], sep = ""), ".csv", sep = "")
+  test_df <- read.csv(directory)
+  names(test_df) <- c("Time", "Distance")
+  test_df$isInside <- test_df$Distance<10
+  main_df$isInsidePercent[i] <- length(test_df$isInside[test_df$isInside==TRUE])/5000
+}
 ```
 
 
-# Making the distance score
+
+# Prediction model
 
 ```{r}
+# Find the ones that are not in my original dataset
+library("Peptides")
+test_amino_acids <- setdiff(substr(list.files("data//d1_distance/"), 22, 23), main_df$name)
+# Filter any non protein mutant combinations
+test_amino_acids <- test_amino_acids[grepl("[ARDNCEQGHILKMFPSTWYV]{2}", test_amino_acids)]
+
+for (aa in test_amino_acids) {
+  df <- readXVG(paste(paste("data//d1_distance/D1-PRO-R1001-CG-2lcb-",aa,sep = ""),".xvg", sep = "")) 
+  
+  names(df) <- c("time", "distance")
+  df$time <- as.numeric(df$time)
+  df$distance <- as.numeric(df$distance)
+      
+      df$simulation <- case_when(df$time <= (100000 * 5) ~ 1,
+                                 df$time <= (200000 * 5) ~ 2,
+                                 df$time <= (299998 * 5) ~ 3)
+      write.csv(
+        x = df,
+        file = paste("data//test_mutants/", paste(aa, ".csv", sep = ""), sep = ""),
+        row.names = FALSE
+      )
+}
+```
+
+```{r}
+# Save the main_df as csv file for future work
+write.csv(
+        x = main_df,
+        file = paste("data//", paste("main_df", ".csv", sep = ""), sep = ""),
+        row.names = FALSE
+      )
 
 ```
 
-# Plots
 
 ```{r}
+#Prediction 
 
+# Build linear model 
+model <- lm(mean_var ~ var_score, data = main_df)
+# Add predictions 
+pred.int <- predict(model, interval = "prediction")
+mydata <- cbind(main_df, pred.int)
+# Regression line + confidence intervals
+p <- ggplot(mydata, aes(var_score, mean_var)) +
+  geom_point() +
+  stat_smooth(method = lm)
+# Add prediction intervals
+p + geom_line(aes(y = lwr), color = "red", linetype = "dashed")+
+    geom_line(aes(y = upr), color = "red", linetype = "dashed") +
+  labs(title = "Linear regression model plot") +
+  scale_x_continuous(name = "Variance Score") +
+  scale_y_continuous(name = "Mean Variance") +
+  theme_minimal()
+
+predict(model, newdata = data.frame(var_score = test_df$var_score))
+
+test_df$predicted <- predict(model, newdata = data.frame(var_score = test_df$var_score))
 ```
+```{r}
+# The function that reads an individual simulation of a given mutant
+get_sim <- function(AAname, simNum, data_directory = "data//extracted_data/") {
+    fileName <- paste(AAname, ".csv", sep = "")
+    path <- paste(data_directory, fileName, sep = "")
+    
+    df <- read.csv(path)
+    
+    if (simNum == 1) {
+      return(df[c(10001:100000), ])
+    } else if (simNum == 2) {
+      return(df[c(110001:200000), ])
+    } else if (simNum == 3) {
+      return(df[c(209999:299998), ])
+    }
+}
 
-# Clustering
+# Function that gives all simulations concatenated
+get_all_sim <- function(AAname, data_directory = "data//extracted_data/") {
+    fileName <- paste(AAname, ".csv", sep = "")
+    path <- paste(data_directory, fileName, sep = "")
+    df <- read.csv(path)
+    
+    
+    return(rbind(df[c(c(10001:100000), c(110001:200000), c(209999:299998)), ]))
+}
+```
 
 ```{r}
+test_df <- data.frame(name = test_amino_acids)
+test_df$first_letter <- substr(test_df$name,1,1)
+test_df$second_letter <- substr(test_df$name,2,2)
 
+sims_df_test <- rbind(data.frame(name = test_df$name, simulation = rep(1, length(test_df$name))),data.frame(name = test_df$name, simulation = rep(2, length(test_df$name))),data.frame(name = test_df$name, simulation = rep(3, length(test_df$name))))
+
+for (i in seq_along(sims_df_test$name)) {
+  sim_data <- get_sim(sims_df_test$name[i],sims_df_test$simulation[i], "data//test_mutants/")
+  sims_df_test$variance[i] <- var(sim_data$distance)
+}
+
+sims_df_test <- sims_df_test[order(sims_df_test$name, sims_df_test$simulation),]
+
+for (i in seq_along(test_df$name)) {
+  aa <- test_df$name[i]
+  df <- get_all_sim(aa, "data//test_mutants/")
+  
+  test_df$var_score[i] <-
+      (aa_df[aa_df$amino_acid == test_df$first_letter[i],]$as_first_var +
+      aa_df[aa_df$amino_acid == test_df$second_letter[i],]$as_second_var)
+  
+  
+}
 ```
 
-# Building a model
-
-```{r}
-
-```
-
-# Applying ACO
-
-```{r}
-
-```
-
-# Evaluation
-
-```{r}
-
-```
 
 

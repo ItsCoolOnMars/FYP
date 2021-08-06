@@ -1,0 +1,74 @@
+---
+title: "finding_probability_density"
+author: "Maxim Musikhin"
+date: "16/12/2020"
+output: html_document
+---
+
+```{r}
+nn <- 299998
+
+# Around these
+# very closed 0.7
+# closed 0.9
+# open 1.4
+# very open 1.6
+
+
+betas<-rbeta(nn,7,7)
+vclose <- c(betas*0.4+0.6)
+close <- c(betas*0.4+0.8)
+open <- c(betas*0.4+1.0)
+vopen <- c(betas*0.4 + 1.2)
+
+sims1 <- c(betas[1:(nn/2)]*0.8+0.6,
+          betas[(nn/2+1):nn]*0.8+1.2)
+sims2 <- c(betas*0.4+0.6)
+sims3 <- c(betas*0.8+1.2)
+center <- c(betas*1+0.8)
+plot(density(vclose), xlim=c(0.6,2.0))
+plot(density(close), xlim=c(0.6,2.0))
+plot(density(open), xlim=c(0.6,2.0))
+plot(density(vopen), xlim=c(0.6,2.0))
+
+```
+```{r}
+ks.test(vopen, vopen)$data.name
+```
+
+```{r}
+print(distance_density_plot(get_all_sim("DA"), "DA"))
+ks.test(get_sim("DA", 1)$distance, get_sim("DA", 2)$distance)
+ks.test(get_sim("DA", 2)$distance, get_sim("DA", 3)$distance)
+```
+```{r}
+for (df in c("HS","YK","CG","KD","EY","EV")) {
+  df_to_plot <- read.csv(paste(paste("data/dataframes/",df, sep = ""),".csv", sep = ""))
+  print(1/ks.test(sims2, df_to_plot$distance)[[1]])
+  print(1/ks.test(sims3, df_to_plot$distance)[[1]])
+  print(1/ks.test(center, df_to_plot$distance)[[1]])
+}
+```
+```{r}
+print(ks.test(sims3, sims3)[[1]])
+```
+
+```{r}
+#load necessary libraries
+library(ggplot2)
+library(reshape2)
+
+#create data frame 
+df <- data.frame(index=c(1, 2, 3, 4, 5, 6),
+                 var1=c(4, 4, 5, 4, 3, 2),
+                 var2=c(1, 2, 4, 4, 6, 9),
+                 var3=c(9, 9, 9, 5, 5, 3))
+
+#melt data frame into long format
+df <- melt(df ,  id.vars = 'index', variable.name = 'series')
+
+#create line plot for each column in data frame
+ggplot(df, aes(index, value)) +
+  geom_line(aes(colour = series))
+```
+
